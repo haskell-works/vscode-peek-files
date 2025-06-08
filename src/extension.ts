@@ -66,15 +66,46 @@ export function activate(context: vscode.ExtensionContext) {
         const word = editor.document.getText(wordRange);
         const basename = path.basename(word);
 
-        const matches = await vscode.workspace.findFiles(`**/${basename}`, '**/node_modules/**', 10);
+        const matches = await vscode.workspace.findFiles(`**/${basename}`, '**/node_modules/**', 50);
         if (matches.length === 0) {
           vscode.window.showInformationMessage(`No file named "${basename}" found in workspace.`);
           return;
         }
 
-        // Pick the top match and peek
-        const uri = matches[0];
-        const location = new vscode.Location(uri, new vscode.Position(0, 0));
+        const currentFileDir = path.dirname(editor.document.uri.fsPath);
+        const currentParts = currentFileDir.split(path.sep).filter(Boolean);
+
+        function pathDistance(fromParts: string[], toParts: string[]): number {
+          const len = Math.min(fromParts.length, toParts.length);
+          let common = 0;
+          for (; common < len; ++common) {
+            if (fromParts[common] !== toParts[common]) {
+              break;
+            }
+          }
+          const up = fromParts.length - common - 1;
+          const down = toParts.length - common;
+          return up * 1000 + down;
+        }
+
+        let bestMatch: vscode.Uri | null = null;
+        let minDistance = Infinity;
+
+        for (const uri of matches) {
+          const matchParts = path.dirname(uri.fsPath).split(path.sep).filter(Boolean);
+          const distance = pathDistance(currentParts, matchParts);
+          if (distance < minDistance) {
+            minDistance = distance;
+            bestMatch = uri;
+          }
+        }
+
+        if (!bestMatch) {
+          vscode.window.showInformationMessage(`Could not resolve closest file for "${basename}".`);
+          return;
+        }
+
+        const location = new vscode.Location(bestMatch, new vscode.Position(0, 0));
 
         await vscode.commands.executeCommand(
           'editor.action.peekLocations',
