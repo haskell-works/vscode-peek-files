@@ -9,7 +9,8 @@ export function activate(context: vscode.ExtensionContext) {
     textDecoration: 'underline',
   });
 
-  const updateDecorations = (editor: vscode.TextEditor) => {
+
+  async function updateDecorations(editor: vscode.TextEditor) {
     if (!editor) {
       return;
     }
@@ -18,24 +19,44 @@ export function activate(context: vscode.ExtensionContext) {
     const fileRegex = /\b[\w\-.\/]+\.(txt|js|ts|rs|java|cpp|c|md|json|yaml|yml|py|go|rb|sh)\b/g;
     const decorations: vscode.DecorationOptions[] = [];
 
-    let match;
-    while ((match = fileRegex.exec(text)) !== null) {
-      const startPos = editor.document.positionAt(match.index);
-      const endPos = editor.document.positionAt(match.index + match[0].length);
-      decorations.push({ range: new vscode.Range(startPos, endPos) });
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+    if (!workspaceFolder) {
+      return;
     }
 
-    editor.setDecorations(decorationType, decorations);
-  };
+    const basePath = workspaceFolder.uri.fsPath;
+    const candidates: { match: string; range: vscode.Range }[] = [];
 
-  // Run when an editor becomes active
+    let match;
+    while ((match = fileRegex.exec(text)) !== null) {
+      const filename = match[0];
+      const startPos = editor.document.positionAt(match.index);
+      const endPos = editor.document.positionAt(match.index + filename.length);
+      const range = new vscode.Range(startPos, endPos);
+      candidates.push({ match: filename, range });
+    }
+
+    await Promise.all(
+      candidates.map(async ({ match, range }) => {
+        const fileUri = vscode.Uri.file(require('path').resolve(basePath, match));
+        try {
+          await vscode.workspace.fs.stat(fileUri);
+          decorations.push({ range });
+        } catch {
+          // File does not exist, skip
+        }
+      })
+    );
+
+    editor.setDecorations(decorationType, decorations);
+  }
+
   vscode.window.onDidChangeActiveTextEditor(editor => {
     if (editor) {
       updateDecorations(editor);
     }
   }, null, context.subscriptions);
 
-  // Run on text change
   vscode.workspace.onDidChangeTextDocument(event => {
     const editor = vscode.window.activeTextEditor;
     if (editor && event.document === editor.document) {
@@ -43,11 +64,11 @@ export function activate(context: vscode.ExtensionContext) {
     }
   }, null, context.subscriptions);
 
-  // Run initially for active editor
   if (vscode.window.activeTextEditor) {
     updateDecorations(vscode.window.activeTextEditor);
   }
 }
+
 
 // This method is called when your extension is deactivated
 export function deactivate() {}
