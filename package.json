@@ -12,6 +12,16 @@
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "My Extension Settings",
+      "properties": {
+        "peekFiles.parentTraversalCost": {
+          "type": "number",
+          "default": 1000,
+          "description": "Cost of navigating to a parent directory when choosing the best matching file for peek. Going into subdirectories always costs 1."
+        }
+      }
+    },
     "commands": [
       {
         "command": "peek-files.helloWorld",
