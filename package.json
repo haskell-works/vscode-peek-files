@@ -27,8 +27,15 @@
     },
     "commands": [
       {
-        "command": "peek-files.helloWorld",
-        "title": "Hello World"
+        "command": "extension.peekFilename",
+        "title": "Peek Filename Under Cursor"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "extension.peekFilename",
+        "key": "cmd+alt+p",
+        "when": "editorTextFocus"
       }
     ]
   },

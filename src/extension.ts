@@ -48,6 +48,43 @@ export function activate(context: vscode.ExtensionContext) {
       .map(({ range }) => ({ range }));
 
     editor.setDecorations(decorationType, decorations);
+
+    context.subscriptions.push(
+      vscode.commands.registerCommand('extension.peekFilename', async () => {
+        const editor = vscode.window.activeTextEditor;
+
+        if (!editor) {
+          return;
+        }
+
+        const position = editor.selection.active;
+        const wordRange = editor.document.getWordRangeAtPosition(position, /\b[\w\-./\\]+\.\w+\b/);
+        if (!wordRange) {
+          return;
+        }
+
+        const word = editor.document.getText(wordRange);
+        const basename = path.basename(word);
+
+        const matches = await vscode.workspace.findFiles(`**/${basename}`, '**/node_modules/**', 10);
+        if (matches.length === 0) {
+          vscode.window.showInformationMessage(`No file named "${basename}" found in workspace.`);
+          return;
+        }
+
+        // Pick the top match and peek
+        const uri = matches[0];
+        const location = new vscode.Location(uri, new vscode.Position(0, 0));
+
+        await vscode.commands.executeCommand(
+          'editor.action.peekLocations',
+          editor.document.uri,
+          position,
+          [location],
+          'peek'
+        );
+      })
+    );
   }
 
   vscode.window.onDidChangeActiveTextEditor(editor => {
