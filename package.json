@@ -16,7 +16,7 @@
   "main": "./dist/extension.js",
   "contributes": {
     "configuration": {
-      "title": "My Extension Settings",
+      "title": "Peek Files Settings",
       "properties": {
         "peekFiles.parentTraversalCost": {
           "type": "number",
@@ -27,13 +27,13 @@
     },
     "commands": [
       {
-        "command": "extension.peekFilename",
-        "title": "Peek Filename Under Cursor"
+        "command": "extension.peekFile",
+        "title": "Peek File Under Cursor"
       }
     ],
     "keybindings": [
       {
-        "command": "extension.peekFilename",
+        "command": "extension.peekFile",
         "key": "cmd+alt+p",
         "when": "editorTextFocus"
       }

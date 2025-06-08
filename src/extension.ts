@@ -3,6 +3,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 
+const config = vscode.workspace.getConfiguration('filenameUnderline');
+const parentTraversalCost = config.get<number>('parentTraversalCost', 1000);
+
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
@@ -78,15 +81,19 @@ export function activate(context: vscode.ExtensionContext) {
         function pathDistance(fromParts: string[], toParts: string[]): number {
           const len = Math.min(fromParts.length, toParts.length);
           let common = 0;
+
           for (; common < len; ++common) {
             if (fromParts[common] !== toParts[common]) {
               break;
             }
           }
-          const up = fromParts.length - common - 1;
+
+          const up = fromParts.length - common;
           const down = toParts.length - common;
-          return up * 1000 + down;
+
+          return up * parentTraversalCost + down;
         }
+
 
         let bestMatch: vscode.Uri | null = null;
         let minDistance = Infinity;
