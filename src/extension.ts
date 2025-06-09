@@ -105,23 +105,6 @@ async function peekFileCommand() {
   const currentFileDir = path.dirname(editor.document.uri.fsPath);
   const currentParts = currentFileDir.split(path.sep).filter(Boolean);
 
-  function pathDistance(fromParts: string[], toParts: string[]): number {
-    const len = Math.min(fromParts.length, toParts.length);
-    let common = 0;
-
-    for (; common < len; ++common) {
-      if (fromParts[common] !== toParts[common]) {
-        break;
-      }
-    }
-
-    const up = fromParts.length - common;
-    const down = toParts.length - common;
-
-    return up * parentTraversalCost + down;
-  }
-
-
   let bestMatch: vscode.Uri | null = null;
   let minDistance = Infinity;
 
@@ -148,4 +131,20 @@ async function peekFileCommand() {
     [location],
     'peek'
   );
+}
+
+function pathDistance(fromParts: string[], toParts: string[]): number {
+  const len = Math.min(fromParts.length, toParts.length);
+  let common = 0;
+
+  for (; common < len; ++common) {
+    if (fromParts[common] !== toParts[common]) {
+      break;
+    }
+  }
+
+  const up = fromParts.length - common;
+  const down = toParts.length - common;
+
+  return up * parentTraversalCost + down;
 }
