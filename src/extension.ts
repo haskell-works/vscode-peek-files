@@ -21,6 +21,10 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('extension.peekFile', peekFileCommand)
   );
 
+  context.subscriptions.push(
+    vscode.languages.registerDefinitionProvider({ scheme: 'file' }, { provideDefinition })
+  );
+
   vscode.window.onDidChangeActiveTextEditor(editor => {
     if (editor) {
       updateDecorations(editor);
@@ -149,39 +153,39 @@ function pathDistance(fromParts: string[], toParts: string[]): number {
   return up * parentTraversalCost + down;
 }
 
-vscode.languages.registerDefinitionProvider({ scheme: 'file' }, {
-  async provideDefinition(document, position) {
-    const wordRange = document.getWordRangeAtPosition(position, /\b[\w\-./\\]+\.\w+\b/);
-    if (!wordRange) {
-      return;
-    }
-
-    const word = document.getText(wordRange);
-    const basename = path.basename(word);
-    const matches = await vscode.workspace.findFiles(`**/${basename}`, '**/node_modules/**', 50);
-
-    if (matches.length === 0) {
-      return;
-    }
-
-    // Pick closest match using your existing logic
-    const currentParts = path.dirname(document.uri.fsPath).split(path.sep).filter(Boolean);
-    let bestMatch: vscode.Uri | null = null;
-    let minDistance = Infinity;
-
-    for (const uri of matches) {
-      const matchParts = path.dirname(uri.fsPath).split(path.sep).filter(Boolean);
-      const distance = pathDistance(currentParts, matchParts);
-      if (distance < minDistance) {
-        minDistance = distance;
-        bestMatch = uri;
-      }
-    }
-
-    if (!bestMatch) {
-      return;
-    }
-
-    return new vscode.Location(bestMatch, new vscode.Position(0, 0));
+async function provideDefinition(
+  document: vscode.TextDocument,
+  position: vscode.Position
+): Promise<vscode.Location | undefined> {
+  const wordRange = document.getWordRangeAtPosition(position, /\b[\w\-./\\]+\.\w+\b/);
+  if (!wordRange) {
+    return;
   }
-});
+
+  const word = document.getText(wordRange);
+  const basename = path.basename(word);
+  const matches = await vscode.workspace.findFiles(`**/${basename}`, '**/node_modules/**', 50);
+
+  if (matches.length === 0) {
+    return;
+  }
+
+  const currentParts = path.dirname(document.uri.fsPath).split(path.sep).filter(Boolean);
+  let bestMatch: vscode.Uri | null = null;
+  let minDistance = Infinity;
+
+  for (const uri of matches) {
+    const matchParts = path.dirname(uri.fsPath).split(path.sep).filter(Boolean);
+    const distance = pathDistance(currentParts, matchParts);
+    if (distance < minDistance) {
+      minDistance = distance;
+      bestMatch = uri;
+    }
+  }
+
+  if (!bestMatch) {
+    return;
+  }
+
+  return new vscode.Location(bestMatch, new vscode.Position(0, 0));
+}
