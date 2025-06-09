@@ -171,6 +171,7 @@ async function provideDefinition(
 
   const bestMatch = await findClosestFile(basename, path.dirname(document.uri.fsPath));
   if (!bestMatch) {
+    vscode.window.setStatusBarMessage(`No file found matching "${basename}"`, 2000);
     return;
   }
 
