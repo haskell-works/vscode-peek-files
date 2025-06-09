@@ -3,6 +3,7 @@
   "displayName": "Peek Files",
   "description": "Peek into files in your editor",
   "version": "0.0.1",
+  "publisher": "JohnKy",
   "engines": {
     "vscode": "^1.100.0"
   },
