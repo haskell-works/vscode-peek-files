@@ -86,7 +86,6 @@ async function updateDecorations(editor: vscode.TextEditor) {
 
 async function peekFileCommand() {
   const editor = vscode.window.activeTextEditor;
-
   if (!editor) {
     return;
   }
@@ -100,15 +99,32 @@ async function peekFileCommand() {
   const word = editor.document.getText(wordRange);
   const basename = path.basename(word);
 
-  const matches = await vscode.workspace.findFiles(`**/${basename}`, '**/node_modules/**', 50);
-  if (matches.length === 0) {
-    vscode.window.showInformationMessage(`No file named "${basename}" found in workspace.`);
+  const bestMatch = await findClosestFile(basename, path.dirname(editor.document.uri.fsPath));
+  if (!bestMatch) {
+    vscode.window.showInformationMessage(`Could not resolve closest file for "${basename}".`);
     return;
   }
 
-  const currentFileDir = path.dirname(editor.document.uri.fsPath);
-  const currentParts = currentFileDir.split(path.sep).filter(Boolean);
+  const location = new vscode.Location(bestMatch, new vscode.Position(0, 0));
+  await vscode.commands.executeCommand(
+    'editor.action.peekLocations',
+    editor.document.uri,
+    position,
+    [location],
+    'peek'
+  );
+}
 
+async function findClosestFile(
+  basename: string,
+  relativeTo: string
+): Promise<vscode.Uri | undefined> {
+  const matches = await vscode.workspace.findFiles(`**/${basename}`, '**/node_modules/**', 50);
+  if (matches.length === 0) {
+    return;
+  }
+
+  const currentParts = relativeTo.split(path.sep).filter(Boolean);
   let bestMatch: vscode.Uri | null = null;
   let minDistance = Infinity;
 
@@ -121,20 +137,7 @@ async function peekFileCommand() {
     }
   }
 
-  if (!bestMatch) {
-    vscode.window.showInformationMessage(`Could not resolve closest file for "${basename}".`);
-    return;
-  }
-
-  const location = new vscode.Location(bestMatch, new vscode.Position(0, 0));
-
-  await vscode.commands.executeCommand(
-    'editor.action.peekLocations',
-    editor.document.uri,
-    position,
-    [location],
-    'peek'
-  );
+  return bestMatch ?? undefined;
 }
 
 function pathDistance(fromParts: string[], toParts: string[]): number {
@@ -164,25 +167,8 @@ async function provideDefinition(
 
   const word = document.getText(wordRange);
   const basename = path.basename(word);
-  const matches = await vscode.workspace.findFiles(`**/${basename}`, '**/node_modules/**', 50);
 
-  if (matches.length === 0) {
-    return;
-  }
-
-  const currentParts = path.dirname(document.uri.fsPath).split(path.sep).filter(Boolean);
-  let bestMatch: vscode.Uri | null = null;
-  let minDistance = Infinity;
-
-  for (const uri of matches) {
-    const matchParts = path.dirname(uri.fsPath).split(path.sep).filter(Boolean);
-    const distance = pathDistance(currentParts, matchParts);
-    if (distance < minDistance) {
-      minDistance = distance;
-      bestMatch = uri;
-    }
-  }
-
+  const bestMatch = await findClosestFile(basename, path.dirname(document.uri.fsPath));
   if (!bestMatch) {
     return;
   }
