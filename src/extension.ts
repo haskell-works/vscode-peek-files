@@ -3,7 +3,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 
-const config = vscode.workspace.getConfiguration('filenameUnderline');
+const config = vscode.workspace.getConfiguration('peekFiles');
 const parentTraversalCost = config.get<number>('parentTraversalCost', 1000);
 
 const decorationType = vscode.window.createTextEditorDecorationType({
