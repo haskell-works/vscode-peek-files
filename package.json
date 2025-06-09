@@ -22,6 +22,11 @@
           "type": "number",
           "default": 1000,
           "description": "Cost of navigating to a parent directory when choosing the best matching file for peek. Going into subdirectories always costs 1."
+        },
+        "peekFiles.fileExtensions": {
+          "type": "array",
+          "description": "List of file extensions to match.",
+          "default": ["json", "md", "txt", "yaml", "yml"]
         }
       }
     },

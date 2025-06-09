@@ -10,7 +10,9 @@ const decorationType = vscode.window.createTextEditorDecorationType({
   textDecoration: 'underline',
 });
 
-const fileRegex = /\b[\w\-./\\]+\.(json|md|txt|yaml|yml)\b/g;
+const fileExtensions = config.get<string[]>('fileExtensions', ['json', 'md', 'txt', 'yaml', 'yml']);
+const extPattern = fileExtensions.join('|');
+const fileRegex = new RegExp(`\\b[\\w\\-./\\\\]+\\.(${extPattern})\\b`, 'g');
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
