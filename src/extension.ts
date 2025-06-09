@@ -5,6 +5,7 @@ import * as path from 'path';
 
 const config = vscode.workspace.getConfiguration('peekFiles');
 const parentTraversalCost = config.get<number>('parentTraversalCost', 1000);
+const filenameRegex = /\b[\w\-./\\]+\.\w+\b/;
 
 const decorationType = vscode.window.createTextEditorDecorationType({
   textDecoration: 'underline',
@@ -91,7 +92,7 @@ async function peekFileCommand() {
   }
 
   const position = editor.selection.active;
-  const wordRange = editor.document.getWordRangeAtPosition(position, /\b[\w\-./\\]+\.\w+\b/);
+  const wordRange = editor.document.getWordRangeAtPosition(position, filenameRegex);
   if (!wordRange) {
     return;
   }
@@ -160,7 +161,7 @@ async function provideDefinition(
   document: vscode.TextDocument,
   position: vscode.Position
 ): Promise<vscode.Location | undefined> {
-  const wordRange = document.getWordRangeAtPosition(position, /\b[\w\-./\\]+\.\w+\b/);
+  const wordRange = document.getWordRangeAtPosition(position, filenameRegex);
   if (!wordRange) {
     return;
   }
