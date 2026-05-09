@@ -2,7 +2,7 @@
   "name": "peek-files",
   "displayName": "Peek Files",
   "description": "Peek into files in your editor",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "publisher": "JohnKy",
   "repository": {
     "type": "git",
