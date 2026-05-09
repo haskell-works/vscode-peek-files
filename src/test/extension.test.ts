@@ -5,9 +5,11 @@ import {
   BasenameIndex,
   buildPattern,
   chunkBasenames,
+  computeGaps,
   detectArgvBudget,
   findFilesByBasenames,
   isSafeBasename,
+  mergeRanges,
 } from '../extension';
 
 suite('isSafeBasename', () => {
@@ -274,6 +276,136 @@ suite('BasenameIndex (integration)', function () {
 
     await vscode.workspace.fs.delete(dir, { recursive: true, useTrash: false });
     await waitFor(() => !idx.has(a) && !idx.has(b));
+  });
+});
+
+suite('mergeRanges', () => {
+  test('empty input returns []', () => {
+    assert.deepStrictEqual(mergeRanges([]), []);
+  });
+
+  test('single range passes through', () => {
+    assert.deepStrictEqual(mergeRanges([{ start: 5, end: 10 }]), [{ start: 5, end: 10 }]);
+  });
+
+  test('disjoint sorted ranges are preserved', () => {
+    assert.deepStrictEqual(
+      mergeRanges([{ start: 0, end: 5 }, { start: 10, end: 15 }]),
+      [{ start: 0, end: 5 }, { start: 10, end: 15 }],
+    );
+  });
+
+  test('adjacent ranges (end+1 == next.start) are merged', () => {
+    assert.deepStrictEqual(
+      mergeRanges([{ start: 0, end: 5 }, { start: 6, end: 10 }]),
+      [{ start: 0, end: 10 }],
+    );
+  });
+
+  test('overlapping ranges are merged', () => {
+    assert.deepStrictEqual(
+      mergeRanges([{ start: 0, end: 7 }, { start: 5, end: 12 }]),
+      [{ start: 0, end: 12 }],
+    );
+  });
+
+  test('out-of-order input is sorted before merging', () => {
+    assert.deepStrictEqual(
+      mergeRanges([{ start: 20, end: 30 }, { start: 0, end: 5 }, { start: 10, end: 15 }]),
+      [{ start: 0, end: 5 }, { start: 10, end: 15 }, { start: 20, end: 30 }],
+    );
+  });
+
+  test('nested ranges (one contains the other) collapse to the outer', () => {
+    assert.deepStrictEqual(
+      mergeRanges([{ start: 0, end: 100 }, { start: 20, end: 30 }]),
+      [{ start: 0, end: 100 }],
+    );
+  });
+
+  test('does not mutate the input', () => {
+    const input = [{ start: 10, end: 20 }, { start: 0, end: 5 }];
+    const snapshot = JSON.parse(JSON.stringify(input));
+    mergeRanges(input);
+    assert.deepStrictEqual(input, snapshot);
+  });
+});
+
+suite('computeGaps', () => {
+  test('empty wanted returns []', () => {
+    assert.deepStrictEqual(computeGaps([{ start: 0, end: 100 }], []), []);
+  });
+
+  test('empty scanned returns the merged wanted set', () => {
+    assert.deepStrictEqual(
+      computeGaps([], [{ start: 0, end: 50 }, { start: 60, end: 100 }]),
+      [{ start: 0, end: 50 }, { start: 60, end: 100 }],
+    );
+  });
+
+  test('wanted fully covered by scanned returns []', () => {
+    assert.deepStrictEqual(
+      computeGaps([{ start: 0, end: 100 }], [{ start: 20, end: 80 }]),
+      [],
+    );
+  });
+
+  test('wanted entirely disjoint from scanned returns wanted', () => {
+    assert.deepStrictEqual(
+      computeGaps([{ start: 0, end: 100 }], [{ start: 200, end: 300 }]),
+      [{ start: 200, end: 300 }],
+    );
+  });
+
+  test('partial left overlap leaves the uncovered tail', () => {
+    assert.deepStrictEqual(
+      computeGaps([{ start: 0, end: 50 }], [{ start: 30, end: 100 }]),
+      [{ start: 51, end: 100 }],
+    );
+  });
+
+  test('partial right overlap leaves the uncovered head', () => {
+    assert.deepStrictEqual(
+      computeGaps([{ start: 60, end: 200 }], [{ start: 0, end: 100 }]),
+      [{ start: 0, end: 59 }],
+    );
+  });
+
+  test('a hole in the middle of scanned produces two gaps', () => {
+    assert.deepStrictEqual(
+      computeGaps(
+        [{ start: 0, end: 50 }, { start: 100, end: 150 }],
+        [{ start: 20, end: 130 }],
+      ),
+      [{ start: 51, end: 99 }],
+    );
+  });
+
+  test('scanned interior of wanted produces gaps on both sides', () => {
+    assert.deepStrictEqual(
+      computeGaps([{ start: 30, end: 60 }], [{ start: 0, end: 100 }]),
+      [{ start: 0, end: 29 }, { start: 61, end: 100 }],
+    );
+  });
+
+  test('multiple wanted ranges each get gap-clipped independently', () => {
+    assert.deepStrictEqual(
+      computeGaps(
+        [{ start: 50, end: 150 }],
+        [{ start: 0, end: 100 }, { start: 120, end: 200 }],
+      ),
+      [{ start: 0, end: 49 }, { start: 151, end: 200 }],
+    );
+  });
+
+  test('adjacent (end+1 == start) scanned range covers wanted with no gap', () => {
+    assert.deepStrictEqual(
+      computeGaps(
+        [{ start: 0, end: 49 }, { start: 50, end: 100 }],
+        [{ start: 0, end: 100 }],
+      ),
+      [],
+    );
   });
 });
 
