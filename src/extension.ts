@@ -19,6 +19,10 @@ const indexMode = config.get<'on' | 'off'>('indexMode', 'on');
 const excludeGlob = config.get<string | null>('exclude', null);
 
 const DEBOUNCE_MS = 200;
+const SCROLL_DEBOUNCE_MS = 100;
+// Below this line count, scan the whole document on every (re)scan instead of
+// tracking visible-range gaps — the bookkeeping isn't worth it for tiny files.
+const SMALL_FILE_LINE_THRESHOLD = 500;
 const MAX_NAMES_PER_CHUNK = 5000;
 const FALLBACK_ARGV_BUDGET = 16 * 1024;
 const FIND_CLOSEST_LIMIT = 50;
@@ -26,9 +30,18 @@ const FIND_CLOSEST_LIMIT = 50;
 let argvBudget = FALLBACK_ARGV_BUDGET;
 let basenameIndex: BasenameIndex | undefined;
 
+export type LineRange = { start: number; end: number }; // both inclusive
+
 type ScanState = {
   timer?: NodeJS.Timeout;
   tokenSource?: vscode.CancellationTokenSource;
+  // Sorted, non-overlapping line ranges already scanned for this document.
+  // Cleared on text change or basename-index change; extended on scroll.
+  scannedLineRanges: LineRange[];
+  // Decorations resolved from `scannedLineRanges`. setDecorations is a full
+  // replacement, so we union this with any newly-resolved decorations on
+  // every commit.
+  decorations: vscode.DecorationOptions[];
 };
 const scanStates = new Map<string, ScanState>();
 
@@ -41,7 +54,9 @@ export function activate(context: vscode.ExtensionContext) {
     basenameIndex = new BasenameIndex(fileExtensions, () => {
       const editor = vscode.window.activeTextEditor;
       if (editor) {
-        scheduleDecorations(editor, 0);
+        // Index changed — a previously-unresolvable basename in the cached
+        // scanned region may now resolve (or vice versa), so invalidate.
+        scheduleDecorations(editor, 0, true);
       }
     });
     context.subscriptions.push(basenameIndex);
@@ -64,7 +79,13 @@ export function activate(context: vscode.ExtensionContext) {
   vscode.workspace.onDidChangeTextDocument(event => {
     const editor = vscode.window.activeTextEditor;
     if (editor && event.document === editor.document) {
-      scheduleDecorations(editor, DEBOUNCE_MS);
+      scheduleDecorations(editor, DEBOUNCE_MS, true);
+    }
+  }, null, context.subscriptions);
+
+  vscode.window.onDidChangeTextEditorVisibleRanges(event => {
+    if (event.textEditor === vscode.window.activeTextEditor) {
+      scheduleDecorations(event.textEditor, SCROLL_DEBOUNCE_MS);
     }
   }, null, context.subscriptions);
 
@@ -86,12 +107,20 @@ export function deactivate() {
   basenameIndex = undefined;
 }
 
-function scheduleDecorations(editor: vscode.TextEditor, delayMs: number) {
+function scheduleDecorations(
+  editor: vscode.TextEditor,
+  delayMs: number,
+  invalidate: boolean = false,
+) {
   const key = editor.document.uri.toString();
   let state = scanStates.get(key);
   if (!state) {
-    state = {};
+    state = { scannedLineRanges: [], decorations: [] };
     scanStates.set(key, state);
+  }
+  if (invalidate) {
+    state.scannedLineRanges = [];
+    state.decorations = [];
   }
   const s = state;
   if (s.timer) {
@@ -107,7 +136,7 @@ function scheduleDecorations(editor: vscode.TextEditor, delayMs: number) {
     s.timer = undefined;
     const tokenSource = new vscode.CancellationTokenSource();
     s.tokenSource = tokenSource;
-    void updateDecorations(editor, tokenSource.token).finally(() => {
+    void updateDecorations(editor, s, tokenSource.token).finally(() => {
       if (s.tokenSource === tokenSource) {
         tokenSource.dispose();
         s.tokenSource = undefined;
@@ -127,43 +156,133 @@ function cancelScan(key: string) {
   scanStates.delete(key);
 }
 
-async function updateDecorations(editor: vscode.TextEditor, token: vscode.CancellationToken) {
-  const text = editor.document.getText();
-  const candidates: { match: string; range: vscode.Range }[] = [];
-
-  let match;
-  while ((match = fileRegex.exec(text)) !== null) {
-    const filename = match[0];
-    const startPos = editor.document.positionAt(match.index);
-    const endPos = editor.document.positionAt(match.index + filename.length);
-    candidates.push({ match: filename, range: new vscode.Range(startPos, endPos) });
+// What ranges of the document we want to have decorated. For small files we
+// scan the whole document up front so the cache covers everything and scroll
+// events become no-ops. For large files we only chase the user's viewport.
+function wantedLineRanges(editor: vscode.TextEditor): LineRange[] {
+  const lineCount = editor.document.lineCount;
+  if (lineCount === 0) {return [];}
+  if (lineCount <= SMALL_FILE_LINE_THRESHOLD) {
+    return [{ start: 0, end: lineCount - 1 }];
   }
+  return editor.visibleRanges.map(r => ({
+    start: r.start.line,
+    end: Math.min(r.end.line, lineCount - 1),
+  }));
+}
 
-  const uniqueFilenames = [...new Set(candidates.map(c => path.basename(c.match)))];
+async function updateDecorations(
+  editor: vscode.TextEditor,
+  state: ScanState,
+  token: vscode.CancellationToken,
+) {
+  const wanted = wantedLineRanges(editor);
+  const gaps = computeGaps(state.scannedLineRanges, wanted);
 
-  if (uniqueFilenames.length === 0) {
+  if (gaps.length === 0) {
+    // Cache already covers everything visible — just re-apply (the editor may
+    // have lost decorations across a switch, or this is the steady-state
+    // scroll case where nothing new came into view).
     if (!token.isCancellationRequested) {
-      editor.setDecorations(decorationType, []);
+      editor.setDecorations(decorationType, state.decorations);
     }
     return;
   }
 
-  let foundFileSet: Set<string>;
-  if (basenameIndex) {
-    await basenameIndex.ready;
-    if (token.isCancellationRequested) {return;}
-    foundFileSet = new Set(uniqueFilenames.filter(name => basenameIndex!.has(name)));
-  } else {
-    const foundUris = await findFilesByBasenames(uniqueFilenames, undefined, token);
-    if (token.isCancellationRequested) {return;}
-    foundFileSet = new Set(foundUris.map(uri => path.basename(uri.fsPath)));
+  const newCandidates: { match: string; range: vscode.Range }[] = [];
+  for (const gap of gaps) {
+    const startPos = new vscode.Position(gap.start, 0);
+    const endPos = editor.document.lineAt(gap.end).range.end;
+    const startOffset = editor.document.offsetAt(startPos);
+    const text = editor.document.getText(new vscode.Range(startPos, endPos));
+    for (const m of text.matchAll(fileRegex)) {
+      const filename = m[0];
+      const idx = m.index!;
+      const start = editor.document.positionAt(startOffset + idx);
+      const end = editor.document.positionAt(startOffset + idx + filename.length);
+      newCandidates.push({ match: filename, range: new vscode.Range(start, end) });
+    }
   }
 
-  const decorations = candidates
-    .filter(({ match }) => foundFileSet.has(path.basename(match)))
-    .map(({ range }) => ({ range }));
+  let newDecorations: vscode.DecorationOptions[] = [];
+  if (newCandidates.length > 0) {
+    const uniqueFilenames = [...new Set(newCandidates.map(c => path.basename(c.match)))];
 
-  editor.setDecorations(decorationType, decorations);
+    let foundFileSet: Set<string>;
+    if (basenameIndex) {
+      await basenameIndex.ready;
+      if (token.isCancellationRequested) {return;}
+      foundFileSet = new Set(uniqueFilenames.filter(name => basenameIndex!.has(name)));
+    } else {
+      const foundUris = await findFilesByBasenames(uniqueFilenames, undefined, token);
+      if (token.isCancellationRequested) {return;}
+      foundFileSet = new Set(foundUris.map(uri => path.basename(uri.fsPath)));
+    }
+
+    newDecorations = newCandidates
+      .filter(({ match }) => foundFileSet.has(path.basename(match)))
+      .map(({ range }) => ({ range }));
+  }
+
+  if (token.isCancellationRequested) {return;}
+
+  // Commit cache updates only after all async work succeeded — a cancelled
+  // scan must leave state untouched so the replacement scan can re-cover the
+  // same gaps.
+  state.decorations = state.decorations.concat(newDecorations);
+  state.scannedLineRanges = mergeRanges(state.scannedLineRanges.concat(gaps));
+  editor.setDecorations(decorationType, state.decorations);
+}
+
+export function mergeRanges(ranges: readonly LineRange[]): LineRange[] {
+  if (ranges.length === 0) {return [];}
+  const sorted = ranges.slice().sort((a, b) => a.start - b.start);
+  const merged: LineRange[] = [{ start: sorted[0].start, end: sorted[0].end }];
+  for (let i = 1; i < sorted.length; i++) {
+    const last = merged[merged.length - 1];
+    const cur = sorted[i];
+    if (cur.start <= last.end + 1) {
+      if (cur.end > last.end) {last.end = cur.end;}
+    } else {
+      merged.push({ start: cur.start, end: cur.end });
+    }
+  }
+  return merged;
+}
+
+// Returns the parts of `wanted` not already covered by `scanned`. Both inputs
+// are line ranges (inclusive on both ends); the result is also inclusive and
+// merged. Inputs need not be sorted or merged.
+export function computeGaps(
+  scanned: readonly LineRange[],
+  wanted: readonly LineRange[],
+): LineRange[] {
+  const mWanted = mergeRanges(wanted);
+  if (mWanted.length === 0) {return [];}
+  if (scanned.length === 0) {return mWanted;}
+  const mScanned = mergeRanges(scanned);
+  const gaps: LineRange[] = [];
+  let si = 0;
+  for (const w of mWanted) {
+    let cursor = w.start;
+    while (si < mScanned.length && mScanned[si].end < cursor) {si++;}
+    let i = si;
+    while (i < mScanned.length && mScanned[i].start <= w.end) {
+      const s = mScanned[i];
+      if (s.start > cursor) {
+        gaps.push({ start: cursor, end: Math.min(s.start - 1, w.end) });
+      }
+      if (s.end >= cursor) {
+        cursor = s.end + 1;
+      }
+      if (cursor > w.end) {break;}
+      i++;
+    }
+    if (cursor <= w.end) {
+      gaps.push({ start: cursor, end: w.end });
+    }
+  }
+  return gaps;
 }
 
 // Searches the workspace for files matching any of `basenames`. Collapses many
