@@ -37,6 +37,11 @@
           "enum": ["on", "off"],
           "default": "on",
           "description": "Whether to maintain an in-memory index of basenames for the configured extensions. When 'on', the decoration scan runs against the index (no ripgrep on the keystroke path). When 'off', every scan calls findFiles. Reload the window after changing."
+        },
+        "peekFiles.exclude": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Glob pattern of files to exclude from search. When null (default), VS Code's files.exclude and search.exclude settings apply. Set to a glob (e.g. \"{**/node_modules/**,**/dist/**}\") to override."
         }
       }
     },

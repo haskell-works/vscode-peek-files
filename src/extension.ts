@@ -16,6 +16,7 @@ const fileExtensions = config.get<string[]>('fileExtensions', ['json', 'md', 'tx
 const extPattern = fileExtensions.join('|');
 const fileRegex = new RegExp(`\\b[\\w\\-./\\\\]+\\.(${extPattern})\\b`, 'g');
 const indexMode = config.get<'on' | 'off'>('indexMode', 'on');
+const excludeGlob = config.get<string | null>('exclude', null);
 
 const DEBOUNCE_MS = 200;
 const MAX_NAMES_PER_CHUNK = 5000;
@@ -188,7 +189,7 @@ export async function findFilesByBasenames(
   const results = await Promise.all(
     chunks.map(chunk => {
       const max = perCallMax ?? chunk.length;
-      return vscode.workspace.findFiles(buildPattern(chunk), '**/node_modules/**', max, token);
+      return vscode.workspace.findFiles(buildPattern(chunk), excludeGlob, max, token);
     })
   );
   return results.flat();
@@ -460,7 +461,7 @@ export class BasenameIndex implements vscode.Disposable {
   }
 
   private async seed(): Promise<void> {
-    const uris = await vscode.workspace.findFiles(this.seedGlob, '**/node_modules/**');
+    const uris = await vscode.workspace.findFiles(this.seedGlob, excludeGlob);
     for (const uri of uris) {
       this.add(uri);
     }
