@@ -4,19 +4,40 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 
-const config = vscode.workspace.getConfiguration('peekFiles');
-const parentTraversalCost = config.get<number>('parentTraversalCost', 1000);
 const filenameRegex = /\b[\w\-./\\]+\.\w+\b/;
 
 const decorationType = vscode.window.createTextEditorDecorationType({
   textDecoration: 'underline',
 });
 
-const fileExtensions = config.get<string[]>('fileExtensions', ['json', 'md', 'txt', 'yaml', 'yml']);
-const extPattern = fileExtensions.join('|');
-const fileRegex = new RegExp(`\\b[\\w\\-./\\\\]+\\.(${extPattern})\\b`, 'g');
-const indexMode = config.get<'on' | 'off'>('indexMode', 'on');
-const excludeGlob = config.get<string | null>('exclude', null);
+const indexMode = vscode.workspace
+  .getConfiguration('peekFiles')
+  .get<'on' | 'off'>('indexMode', 'on');
+const excludeGlob = vscode.workspace
+  .getConfiguration('peekFiles')
+  .get<string | null>('exclude', null);
+
+let parentTraversalCost = 1000;
+let fileExtensions: string[] = ['json', 'md', 'txt', 'yaml', 'yml'];
+let fileRegex = buildFileRegex(fileExtensions);
+
+function buildFileRegex(extensions: readonly string[]): RegExp {
+  const extPattern = extensions.join('|');
+  return new RegExp(`\\b[\\w\\-./\\\\]+\\.(${extPattern})\\b`, 'g');
+}
+
+function loadParentTraversalCost(): void {
+  parentTraversalCost = vscode.workspace
+    .getConfiguration('peekFiles')
+    .get<number>('parentTraversalCost', 1000);
+}
+
+function loadFileExtensions(): void {
+  fileExtensions = vscode.workspace
+    .getConfiguration('peekFiles')
+    .get<string[]>('fileExtensions', ['json', 'md', 'txt', 'yaml', 'yml']);
+  fileRegex = buildFileRegex(fileExtensions);
+}
 
 const DEBOUNCE_MS = 200;
 const SCROLL_DEBOUNCE_MS = 100;
@@ -49,9 +70,11 @@ const scanStates = new Map<string, ScanState>();
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
   argvBudget = detectArgvBudget();
+  loadParentTraversalCost();
+  loadFileExtensions();
 
-  if (indexMode === 'on') {
-    basenameIndex = new BasenameIndex(fileExtensions, () => {
+  const buildBasenameIndex = (): BasenameIndex => {
+    const idx = new BasenameIndex(fileExtensions, () => {
       const editor = vscode.window.activeTextEditor;
       if (editor) {
         // Index changed — a previously-unresolvable basename in the cached
@@ -59,7 +82,12 @@ export function activate(context: vscode.ExtensionContext) {
         scheduleDecorations(editor, 0, true);
       }
     });
-    context.subscriptions.push(basenameIndex);
+    context.subscriptions.push(idx);
+    return idx;
+  };
+
+  if (indexMode === 'on') {
+    basenameIndex = buildBasenameIndex();
   }
 
   context.subscriptions.push(
@@ -91,6 +119,23 @@ export function activate(context: vscode.ExtensionContext) {
 
   vscode.workspace.onDidCloseTextDocument(doc => {
     cancelScan(doc.uri.toString());
+  }, null, context.subscriptions);
+
+  vscode.workspace.onDidChangeConfiguration(event => {
+    if (event.affectsConfiguration('peekFiles.parentTraversalCost')) {
+      loadParentTraversalCost();
+    }
+    if (event.affectsConfiguration('peekFiles.fileExtensions')) {
+      loadFileExtensions();
+      if (basenameIndex) {
+        basenameIndex.dispose();
+        basenameIndex = buildBasenameIndex();
+      }
+      const editor = vscode.window.activeTextEditor;
+      if (editor) {
+        scheduleDecorations(editor, 0, true);
+      }
+    }
   }, null, context.subscriptions);
 
   if (vscode.window.activeTextEditor) {
