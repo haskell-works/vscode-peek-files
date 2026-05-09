@@ -29,4 +29,4 @@ Two regexes intentionally differ:
 - `filenameRegex` (used by peek/definition via `getWordRangeAtPosition`) matches *any* extension — so the user can peek a token VS Code didn't underline.
 - `fileRegex` (used by decorations) is restricted to `peekFiles.fileExtensions` to keep the decoration scan cheap.
 
-Configuration is read **once at module load**, so changes to `peekFiles.*` settings require a window reload to take effect.
+Configuration is loaded in `activate` and refreshed via `vscode.workspace.onDidChangeConfiguration`, so edits to `peekFiles.*` settings take effect on the next decoration / peek without a window reload.
