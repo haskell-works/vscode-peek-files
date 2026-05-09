@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import {
+  BasenameIndex,
   buildPattern,
   chunkBasenames,
   detectArgvBudget,
@@ -125,6 +126,154 @@ suite('findFilesByBasenames (integration)', () => {
     const out = await findFilesByBasenames(['package.json', 'a{b,c}.json', 'x*y.json']);
     const names = out.map(u => path.basename(u.fsPath));
     assert.ok(names.includes('package.json'), `expected package.json in ${names.join(',')}`);
+  });
+});
+
+suite('BasenameIndex (pure ops)', () => {
+  let idx: BasenameIndex;
+
+  setup(async () => {
+    // Use an extension that won't match anything in the workspace so seed is
+    // empty quickly. Clear after ready resolves to drop any race-window writes.
+    idx = new BasenameIndex(['__peek_never_match_zzzzz__']);
+    await idx.ready;
+    idx.clear();
+  });
+
+  teardown(() => {
+    idx.dispose();
+  });
+
+  test('add then has and get', () => {
+    const u = vscode.Uri.file('/tmp/peek-files-tests/a/foo.json');
+    idx.add(u);
+    assert.strictEqual(idx.has('foo.json'), true);
+    const got = idx.get('foo.json').map(x => x.fsPath);
+    assert.deepStrictEqual(got, ['/tmp/peek-files-tests/a/foo.json']);
+    assert.strictEqual(idx.size(), 1);
+  });
+
+  test('two URIs sharing a basename are deduped by fsPath', () => {
+    const a = vscode.Uri.file('/tmp/peek-files-tests/a/foo.json');
+    const b = vscode.Uri.file('/tmp/peek-files-tests/b/foo.json');
+    idx.add(a);
+    idx.add(b);
+    idx.add(a); // duplicate add is a no-op
+    const paths = idx.get('foo.json').map(x => x.fsPath).sort();
+    assert.deepStrictEqual(paths, [
+      '/tmp/peek-files-tests/a/foo.json',
+      '/tmp/peek-files-tests/b/foo.json',
+    ]);
+    assert.strictEqual(idx.size(), 2);
+  });
+
+  test('remove drops the basename entry when the last URI is removed', () => {
+    const u = vscode.Uri.file('/tmp/peek-files-tests/a/only.json');
+    idx.add(u);
+    idx.remove(u);
+    assert.strictEqual(idx.has('only.json'), false);
+    assert.deepStrictEqual(idx.get('only.json'), []);
+    assert.strictEqual(idx.size(), 0);
+  });
+
+  test('remove of unknown URI is a no-op', () => {
+    idx.add(vscode.Uri.file('/tmp/peek-files-tests/a/foo.json'));
+    idx.remove(vscode.Uri.file('/tmp/peek-files-tests/never-added.json'));
+    assert.strictEqual(idx.has('foo.json'), true);
+    assert.strictEqual(idx.size(), 1);
+  });
+
+  test('removeUnderPrefix removes only entries under the prefix', () => {
+    const inside1 = vscode.Uri.file('/tmp/peek-files-tests/docs/a.md');
+    const inside2 = vscode.Uri.file('/tmp/peek-files-tests/docs/sub/b.md');
+    const sibling = vscode.Uri.file('/tmp/peek-files-tests/other/c.md');
+    idx.add(inside1);
+    idx.add(inside2);
+    idx.add(sibling);
+
+    idx.removeUnderPrefix('/tmp/peek-files-tests/docs' + path.sep);
+
+    assert.strictEqual(idx.has('a.md'), false);
+    assert.strictEqual(idx.has('b.md'), false);
+    assert.strictEqual(idx.has('c.md'), true);
+    assert.strictEqual(idx.size(), 1);
+  });
+
+  test('clear empties the index', () => {
+    idx.add(vscode.Uri.file('/tmp/peek-files-tests/a/foo.json'));
+    idx.add(vscode.Uri.file('/tmp/peek-files-tests/b/bar.md'));
+    idx.clear();
+    assert.strictEqual(idx.size(), 0);
+    assert.strictEqual(idx.has('foo.json'), false);
+    assert.strictEqual(idx.has('bar.md'), false);
+  });
+});
+
+suite('BasenameIndex (integration)', function () {
+  this.timeout(15000);
+
+  let workspaceRoot: vscode.Uri;
+  let idx: BasenameIndex;
+  let scratch: vscode.Uri;
+
+  suiteSetup(function () {
+    if (!vscode.workspace.workspaceFolders?.length) {
+      this.skip();
+    }
+    workspaceRoot = vscode.workspace.workspaceFolders![0].uri;
+  });
+
+  setup(async () => {
+    scratch = vscode.Uri.joinPath(workspaceRoot, '__peek_idx_scratch__');
+    try { await vscode.workspace.fs.delete(scratch, { recursive: true, useTrash: false }); } catch { /* not present */ }
+    await vscode.workspace.fs.createDirectory(scratch);
+    idx = new BasenameIndex(['json', 'md', 'txt', 'yaml', 'yml']);
+    await idx.ready;
+  });
+
+  teardown(async () => {
+    idx.dispose();
+    try { await vscode.workspace.fs.delete(scratch, { recursive: true, useTrash: false }); } catch { /* gone */ }
+  });
+
+  async function waitFor(pred: () => boolean, timeoutMs = 5000): Promise<void> {
+    const start = Date.now();
+    while (!pred()) {
+      if (Date.now() - start > timeoutMs) {
+        throw new Error(`waitFor timed out after ${timeoutMs}ms`);
+      }
+      await new Promise(r => setTimeout(r, 50));
+    }
+  }
+
+  test('seed picks up existing workspace files', () => {
+    assert.strictEqual(idx.has('package.json'), true, 'package.json should be in the seeded index');
+    assert.strictEqual(idx.has('tsconfig.json'), true, 'tsconfig.json should be in the seeded index');
+  });
+
+  test('watcher adds on create and removes on delete', async () => {
+    const name = `peek-idx-${Date.now()}.json`;
+    const uri = vscode.Uri.joinPath(scratch, name);
+
+    await vscode.workspace.fs.writeFile(uri, Buffer.from('{}'));
+    await waitFor(() => idx.has(name));
+
+    await vscode.workspace.fs.delete(uri, { useTrash: false });
+    await waitFor(() => !idx.has(name));
+  });
+
+  test('folder delete evicts every contained basename via prefix prune', async () => {
+    const dirName = `peek-idx-dir-${Date.now()}`;
+    const dir = vscode.Uri.joinPath(scratch, dirName);
+    await vscode.workspace.fs.createDirectory(dir);
+    const a = `peek-idx-a-${Date.now()}.md`;
+    const b = `peek-idx-b-${Date.now()}.md`;
+    await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(dir, a), Buffer.from('a'));
+    await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(dir, b), Buffer.from('b'));
+    await waitFor(() => idx.has(a) && idx.has(b));
+
+    await vscode.workspace.fs.delete(dir, { recursive: true, useTrash: false });
+    await waitFor(() => !idx.has(a) && !idx.has(b));
   });
 });
 

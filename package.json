@@ -31,6 +31,12 @@
           "type": "array",
           "description": "List of file extensions to match.",
           "default": ["json", "md", "txt", "yaml", "yml"]
+        },
+        "peekFiles.indexMode": {
+          "type": "string",
+          "enum": ["on", "off"],
+          "default": "on",
+          "description": "Whether to maintain an in-memory index of basenames for the configured extensions. When 'on', the decoration scan runs against the index (no ripgrep on the keystroke path). When 'off', every scan calls findFiles. Reload the window after changing."
         }
       }
     },

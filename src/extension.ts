@@ -15,12 +15,15 @@ const decorationType = vscode.window.createTextEditorDecorationType({
 const fileExtensions = config.get<string[]>('fileExtensions', ['json', 'md', 'txt', 'yaml', 'yml']);
 const extPattern = fileExtensions.join('|');
 const fileRegex = new RegExp(`\\b[\\w\\-./\\\\]+\\.(${extPattern})\\b`, 'g');
+const indexMode = config.get<'on' | 'off'>('indexMode', 'on');
 
 const DEBOUNCE_MS = 200;
 const MAX_NAMES_PER_CHUNK = 5000;
 const FALLBACK_ARGV_BUDGET = 16 * 1024;
+const FIND_CLOSEST_LIMIT = 50;
 
 let argvBudget = FALLBACK_ARGV_BUDGET;
+let basenameIndex: BasenameIndex | undefined;
 
 type ScanState = {
   timer?: NodeJS.Timeout;
@@ -32,6 +35,16 @@ const scanStates = new Map<string, ScanState>();
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
   argvBudget = detectArgvBudget();
+
+  if (indexMode === 'on') {
+    basenameIndex = new BasenameIndex(fileExtensions, () => {
+      const editor = vscode.window.activeTextEditor;
+      if (editor) {
+        scheduleDecorations(editor, 0);
+      }
+    });
+    context.subscriptions.push(basenameIndex);
+  }
 
   context.subscriptions.push(
     vscode.commands.registerCommand('extension.peekFile', peekFileCommand)
@@ -68,6 +81,8 @@ export function deactivate() {
   for (const key of [...scanStates.keys()]) {
     cancelScan(key);
   }
+  basenameIndex?.dispose();
+  basenameIndex = undefined;
 }
 
 function scheduleDecorations(editor: vscode.TextEditor, delayMs: number) {
@@ -132,10 +147,16 @@ async function updateDecorations(editor: vscode.TextEditor, token: vscode.Cancel
     return;
   }
 
-  const foundUris = await findFilesByBasenames(uniqueFilenames, undefined, token);
-  if (token.isCancellationRequested) {return;}
-
-  const foundFileSet = new Set(foundUris.map(uri => path.basename(uri.fsPath)));
+  let foundFileSet: Set<string>;
+  if (basenameIndex) {
+    await basenameIndex.ready;
+    if (token.isCancellationRequested) {return;}
+    foundFileSet = new Set(uniqueFilenames.filter(name => basenameIndex!.has(name)));
+  } else {
+    const foundUris = await findFilesByBasenames(uniqueFilenames, undefined, token);
+    if (token.isCancellationRequested) {return;}
+    foundFileSet = new Set(foundUris.map(uri => path.basename(uri.fsPath)));
+  }
 
   const decorations = candidates
     .filter(({ match }) => foundFileSet.has(path.basename(match)))
@@ -267,7 +288,13 @@ async function findClosestFile(
   basename: string,
   relativeTo: string
 ): Promise<vscode.Uri | undefined> {
-  const matches = await findFilesByBasenames([basename], 50);
+  let matches: vscode.Uri[];
+  if (basenameIndex) {
+    await basenameIndex.ready;
+    matches = basenameIndex.get(basename).slice(0, FIND_CLOSEST_LIMIT);
+  } else {
+    matches = await findFilesByBasenames([basename], FIND_CLOSEST_LIMIT);
+  }
   if (matches.length === 0) {
     return;
   }
@@ -323,4 +350,144 @@ async function provideDefinition(
   }
 
   return new vscode.Location(bestMatch, new vscode.Position(0, 0));
+}
+
+// In-memory index of basenames -> Uris for the configured extensions. Seeded
+// once via findFiles, then kept in sync by a single FileSystemWatcher. The
+// hot path (decorations + peek) reads this with no I/O.
+//
+// `byFsPath` is a reverse index keyed by fsPath so single-file removes are
+// O(1); `byBasename` is the forward index used by the lookup API.
+//
+// The watcher uses a `**` glob rather than the extension-restricted seed
+// glob: a recursive watcher only fires events for paths that match its
+// pattern, and a deleted *folder* (no extension) wouldn't match
+// `**/*.{json,md,...}`. So we watch everything, filter creates by extension
+// in the handler, and on delete either O(1)-remove a tracked file or
+// prefix-prune for the folder-delete case the API explicitly warns about
+// ("file events from deleting a folder may not include events for the
+// contained files").
+export class BasenameIndex implements vscode.Disposable {
+  private byBasename = new Map<string, Map<string, vscode.Uri>>();
+  private byFsPath = new Map<string, string>();
+  private watcher: vscode.FileSystemWatcher | undefined;
+  private folderListener: vscode.Disposable | undefined;
+  private readonly extSet: Set<string>;
+  private readonly seedGlob: string;
+  private _ready: Promise<void>;
+
+  constructor(
+    extensions: readonly string[],
+    private readonly onChange?: () => void,
+  ) {
+    this.extSet = new Set(extensions);
+    this.seedGlob = `**/*.{${extensions.join(',')}}`;
+    this._ready = this.seed();
+    this.watcher = vscode.workspace.createFileSystemWatcher('**', false, true, false);
+    this.watcher.onDidCreate(uri => this.handleCreate(uri));
+    this.watcher.onDidDelete(uri => this.handleDelete(uri));
+    this.folderListener = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      this.clear();
+      this._ready = this.seed();
+    });
+  }
+
+  get ready(): Promise<void> {
+    return this._ready;
+  }
+
+  has(basename: string): boolean {
+    return this.byBasename.has(basename);
+  }
+
+  get(basename: string): vscode.Uri[] {
+    const inner = this.byBasename.get(basename);
+    return inner ? [...inner.values()] : [];
+  }
+
+  size(): number {
+    return this.byFsPath.size;
+  }
+
+  add(uri: vscode.Uri): void {
+    const fsPath = uri.fsPath;
+    if (this.byFsPath.has(fsPath)) {return;}
+    const basename = path.basename(fsPath);
+    this.byFsPath.set(fsPath, basename);
+    let inner = this.byBasename.get(basename);
+    if (!inner) {
+      inner = new Map();
+      this.byBasename.set(basename, inner);
+    }
+    inner.set(fsPath, uri);
+  }
+
+  remove(uri: vscode.Uri): void {
+    this.removeFsPath(uri.fsPath);
+  }
+
+  removeUnderPrefix(prefix: string): void {
+    for (const fsPath of [...this.byFsPath.keys()]) {
+      if (fsPath === prefix || fsPath.startsWith(prefix)) {
+        this.removeFsPath(fsPath);
+      }
+    }
+  }
+
+  clear(): void {
+    this.byBasename.clear();
+    this.byFsPath.clear();
+  }
+
+  dispose(): void {
+    this.watcher?.dispose();
+    this.watcher = undefined;
+    this.folderListener?.dispose();
+    this.folderListener = undefined;
+    this.clear();
+  }
+
+  private removeFsPath(fsPath: string): void {
+    const basename = this.byFsPath.get(fsPath);
+    if (!basename) {return;}
+    this.byFsPath.delete(fsPath);
+    const inner = this.byBasename.get(basename);
+    if (!inner) {return;}
+    inner.delete(fsPath);
+    if (inner.size === 0) {
+      this.byBasename.delete(basename);
+    }
+  }
+
+  private async seed(): Promise<void> {
+    const uris = await vscode.workspace.findFiles(this.seedGlob, '**/node_modules/**');
+    for (const uri of uris) {
+      this.add(uri);
+    }
+  }
+
+  private matchesExtension(fsPath: string): boolean {
+    const ext = path.extname(fsPath);
+    if (ext.length < 2) {return false;}
+    return this.extSet.has(ext.slice(1));
+  }
+
+  private handleCreate(uri: vscode.Uri): void {
+    if (!this.matchesExtension(uri.fsPath)) {return;}
+    this.add(uri);
+    this.onChange?.();
+  }
+
+  private handleDelete(uri: vscode.Uri): void {
+    if (this.byFsPath.has(uri.fsPath)) {
+      this.remove(uri);
+      this.onChange?.();
+    } else {
+      const before = this.byFsPath.size;
+      this.removeUnderPrefix(uri.fsPath + path.sep);
+      if (this.byFsPath.size !== before) {
+        this.onChange?.();
+      }
+    }
+  }
 }
